@@ -143,18 +143,30 @@ object WalkState {
     private fun addHistoryOnce(context: Context, entry: HistoryEntry) {
         val p = prefs(context)
         if (p.getBoolean(KEY_HISTORY_SAVED, false)) return
-        val array = JSONArray(p.getString(KEY_HISTORY, "[]"))
-        val updated = JSONArray()
-        updated.put(JSONObject().apply {
-            put("endedAt", entry.endedAtMillis)
-            put("duration", entry.durationMs)
-            put("distance", entry.distanceMeters)
-            put("steps", entry.steps)
-        })
-        for (i in 0 until minOf(array.length(), 4)) updated.put(array.getJSONObject(i))
-        p.edit()
-            .putString(KEY_HISTORY, updated.toString())
-            .putBoolean(KEY_HISTORY_SAVED, true)
+        val existing = history(context)
+        val newest = (listOf(entry) + existing)
+            .sortedByDescending { it.endedAtMillis }
+            .take(5)
+        writeHistory(context, newest)
+        p.edit().putBoolean(KEY_HISTORY_SAVED, true).apply()
+    }
+
+    private fun writeHistory(context: Context, entries: List<HistoryEntry>) {
+        val array = JSONArray()
+        entries.sortedByDescending { it.endedAtMillis }.take(5).forEach { entry ->
+            array.put(JSONObject().apply {
+                put("endedAt", entry.endedAtMillis)
+                put("duration", entry.durationMs)
+                put("distance", entry.distanceMeters)
+                put("steps", entry.steps)
+            })
+        }
+        prefs(context).edit().putString(KEY_HISTORY, array.toString()).apply()
+    }
+
+    fun clearHistory(context: Context) {
+        prefs(context).edit()
+            .putString(KEY_HISTORY, "[]")
             .apply()
     }
 
@@ -162,7 +174,7 @@ object WalkState {
         return try {
             val array = JSONArray(prefs(context).getString(KEY_HISTORY, "[]"))
             buildList {
-                for (i in 0 until minOf(array.length(), 5)) {
+                for (i in 0 until array.length()) {
                     val item = array.getJSONObject(i)
                     add(
                         HistoryEntry(
@@ -173,7 +185,7 @@ object WalkState {
                         )
                     )
                 }
-            }
+            }.sortedByDescending { it.endedAtMillis }.take(5)
         } catch (_: Throwable) {
             emptyList()
         }
