@@ -1,6 +1,7 @@
 package com.example.pokewalklite
 
 import android.Manifest
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
@@ -15,8 +16,6 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
-import android.widget.TableLayout
-import android.widget.TableRow
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -30,7 +29,10 @@ import androidx.health.connect.client.PermissionController
 import androidx.health.connect.client.permission.HealthPermission
 import androidx.health.connect.client.records.DistanceRecord
 import androidx.health.connect.client.records.ExerciseSessionRecord
+import androidx.health.connect.client.records.SpeedRecord
 import androidx.health.connect.client.records.StepsRecord
+import androidx.health.connect.client.request.ReadRecordsRequest
+import androidx.health.connect.client.time.TimeRangeFilter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -39,11 +41,15 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.time.Duration
+import java.time.Instant
 import java.util.Locale
+import kotlin.math.abs
 
 class MainActivity : ComponentActivity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var ticker: Job? = null
+    private val verifyingRunIds = mutableSetOf<Long>()
 
     private lateinit var button: Button
     private lateinit var walkModeButton: Button
@@ -52,12 +58,15 @@ class MainActivity : ComponentActivity() {
     private lateinit var distance: TextView
     private lateinit var steps: TextView
     private lateinit var distanceSeek: SeekBar
+    private lateinit var speedSeek: SeekBar
     private lateinit var selectedDistanceLabel: TextView
+    private lateinit var selectedSpeedLabel: TextView
     private lateinit var estimatedTimeLabel: TextView
     private lateinit var historySection: LinearLayout
-    private lateinit var historyTable: TableLayout
+    private lateinit var historyContainer: LinearLayout
 
     private var selectedKm = 5
+    private var selectedSpeedKmh = WalkState.DEFAULT_SPEED_KMH
     private var selectedMode = WalkState.ActivityMode.WALK
     private var historySignature = ""
     private var lastErrorShown: String? = null
@@ -65,14 +74,19 @@ class MainActivity : ComponentActivity() {
     private val healthPermissions = setOf(
         HealthPermission.getWritePermission(StepsRecord::class),
         HealthPermission.getWritePermission(DistanceRecord::class),
-        HealthPermission.getWritePermission(ExerciseSessionRecord::class)
+        HealthPermission.getWritePermission(ExerciseSessionRecord::class),
+        HealthPermission.getWritePermission(SpeedRecord::class),
+        HealthPermission.getReadPermission(StepsRecord::class),
+        HealthPermission.getReadPermission(DistanceRecord::class),
+        HealthPermission.getReadPermission(ExerciseSessionRecord::class),
+        HealthPermission.getReadPermission(SpeedRecord::class)
     )
 
     private val healthPermissionLauncher = registerForActivityResult(
         PermissionController.createRequestPermissionResultContract()
     ) { granted ->
         if (granted.containsAll(healthPermissions)) ensureNotificationPermissionAndStart()
-        else showMessage("Permita passos, distância e exercícios no Health Connect.")
+        else showMessage("Permita passos, distância, velocidade e exercícios no Health Connect.")
     }
 
     private val notificationPermissionLauncher = registerForActivityResult(
@@ -97,6 +111,7 @@ class MainActivity : ComponentActivity() {
         val bottomPad = (40 * d).toInt()
         val sectionPad = (24 * d).toInt()
         selectedKm = WalkState.preferredDistanceKm(this)
+        selectedSpeedKmh = WalkState.preferredSpeedKmh(this)
         selectedMode = WalkState.preferredMode(this)
 
         val scroll = ScrollView(this).apply {
@@ -154,6 +169,40 @@ class MainActivity : ComponentActivity() {
             bottomMargin = sectionPad
         })
 
+        root.addView(TextView(this).apply {
+            text = "VELOCIDADE"
+            textSize = 12f
+            gravity = Gravity.CENTER
+            setTypeface(typeface, Typeface.BOLD)
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        selectedSpeedLabel = TextView(this).apply {
+            textSize = 24f
+            gravity = Gravity.CENTER
+            setTypeface(typeface, Typeface.BOLD)
+        }
+        root.addView(selectedSpeedLabel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        speedSeek = SeekBar(this).apply {
+            max = WalkState.MAX_SPEED_KMH - WalkState.MIN_SPEED_KMH
+            progress = selectedSpeedKmh - WalkState.MIN_SPEED_KMH
+            setPadding(0, (4 * d).toInt(), 0, 0)
+        }
+        root.addView(speedSeek, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        root.addView(endpointRow("1 km/h", "8 km/h"), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = sectionPad
+        })
+
+        speedSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (WalkState.isRunning(this@MainActivity)) return
+                selectedSpeedKmh = progress + WalkState.MIN_SPEED_KMH
+                WalkState.setPreferredSpeedKmh(this@MainActivity, selectedSpeedKmh)
+                updateSelectedConfigText()
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+            override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+        })
+
         val selectorMetrics = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -170,14 +219,7 @@ class MainActivity : ComponentActivity() {
             setPadding(0, (4 * d).toInt(), 0, 0)
         }
         root.addView(distanceSeek, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-
-        val endpoints = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        endpoints.addView(TextView(this).apply { text = "1 km" }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        endpoints.addView(TextView(this).apply {
-            text = "20 km"
-            gravity = Gravity.END
-        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        root.addView(endpoints, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+        root.addView(endpointRow("1 km", "20 km"), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             bottomMargin = sectionPad
         })
 
@@ -186,7 +228,7 @@ class MainActivity : ComponentActivity() {
                 if (WalkState.isRunning(this@MainActivity)) return
                 selectedKm = progress + 1
                 WalkState.setPreferredDistanceKm(this@MainActivity, selectedKm)
-                updateSelectedDistanceText()
+                updateSelectedConfigText()
             }
             override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
             override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
@@ -214,11 +256,19 @@ class MainActivity : ComponentActivity() {
         }
         root.addView(button, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
+        root.addView(Button(this).apply {
+            text = "DIAGNÓSTICO HEALTH CONNECT"
+            backgroundTintList = ColorStateList.valueOf(MODE_IDLE_GRAY)
+            setTextColor(Color.WHITE)
+            setOnClickListener { showLatestDiagnostic() }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = (10 * d).toInt()
+        })
+
         historySection = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
         }
-
         val historyTitleRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -241,17 +291,34 @@ class MainActivity : ComponentActivity() {
             bottomMargin = (8 * d).toInt()
         })
 
-        historyTable = TableLayout(this).apply {
-            isStretchAllColumns = true
-            addView(historyHeader())
+        historyContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
         }
-        historySection.addView(historyTable, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        historySection.addView(historyContainer, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         root.addView(historySection, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
+        root.addView(TextView(this).apply {
+            text = appVersionLabel()
+            textSize = 11f
+            gravity = Gravity.CENTER
+            alpha = 0.6f
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = sectionPad
+        })
+
         setContentView(scroll)
-        updateSelectedDistanceText()
+        updateSelectedConfigText()
         updateModeButtons()
         render()
+    }
+
+    private fun endpointRow(start: String, end: String): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        addView(TextView(this@MainActivity).apply { text = start }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        addView(TextView(this@MainActivity).apply {
+            text = end
+            gravity = Gravity.END
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
     }
 
     private fun selectMode(mode: WalkState.ActivityMode) {
@@ -259,7 +326,7 @@ class MainActivity : ComponentActivity() {
         selectedMode = mode
         WalkState.setPreferredMode(this, mode)
         updateModeButtons()
-        updateSelectedDistanceText()
+        updateSelectedConfigText()
     }
 
     private fun updateModeButtons() {
@@ -296,9 +363,10 @@ class MainActivity : ComponentActivity() {
         return value
     }
 
-    private fun updateSelectedDistanceText() {
+    private fun updateSelectedConfigText() {
+        selectedSpeedLabel.text = "$selectedSpeedKmh km/h"
         selectedDistanceLabel.text = "$selectedKm km"
-        estimatedTimeLabel.text = formatEstimatedDuration(selectedKm * WalkState.MINUTES_PER_KM)
+        estimatedTimeLabel.text = formatEstimatedDuration(WalkState.calculateDurationMs(selectedKm, selectedSpeedKmh))
         if (!WalkState.isRunning(this)) updateStartButtonText()
     }
 
@@ -310,13 +378,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun formatEstimatedDuration(totalMinutes: Int): String {
-        val hours = totalMinutes / 60
-        val minutes = totalMinutes % 60
+    private fun formatEstimatedDuration(durationMs: Long): String {
+        val totalSeconds = ((durationMs + 500L) / 1_000L).coerceAtLeast(1L)
+        val hours = totalSeconds / 3_600L
+        val minutes = (totalSeconds % 3_600L) / 60L
+        val seconds = totalSeconds % 60L
         return when {
-            hours == 0 -> "$minutes min"
-            minutes == 0 -> "$hours h"
-            else -> "$hours h $minutes min"
+            hours > 0L && seconds > 0L -> "$hours h $minutes min $seconds s"
+            hours > 0L -> "$hours h $minutes min"
+            seconds > 0L -> "$minutes min $seconds s"
+            else -> "$minutes min"
         }
     }
 
@@ -339,22 +410,6 @@ class MainActivity : ComponentActivity() {
         }
         parent.addView(box, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         return value
-    }
-
-    private fun historyHeader(): TableRow = TableRow(this).apply {
-        addView(tableCell("TIPO", true))
-        addView(tableCell("TEMPO", true))
-        addView(tableCell("DIST.", true))
-        addView(tableCell("PASSOS", true))
-    }
-
-    private fun tableCell(value: String, bold: Boolean = false): TextView = TextView(this).apply {
-        val d = resources.displayMetrics.density
-        text = value
-        textSize = if (bold) 11f else 14f
-        gravity = Gravity.CENTER
-        setPadding((3 * d).toInt(), (10 * d).toInt(), (3 * d).toInt(), (10 * d).toInt())
-        if (bold) setTypeface(typeface, Typeface.BOLD)
     }
 
     override fun onResume() {
@@ -386,23 +441,25 @@ class MainActivity : ComponentActivity() {
             else -> WalkState.Metrics(0L, 0.0, 0L)
         }
 
-        val sec = metrics.durationMs / 1000L
-        elapsed.text = formatDuration(sec)
+        elapsed.text = formatDuration(metrics.durationMs / 1_000L)
         distance.text = String.format(Locale.getDefault(), "%.2f km", metrics.distanceMeters / 1000.0)
         steps.text = String.format(Locale.getDefault(), "%,d", metrics.steps)
 
         if (running) {
             selectedKm = WalkState.targetDistanceKm(this)
+            selectedSpeedKmh = WalkState.targetSpeedKmh(this)
             selectedMode = WalkState.targetMode(this)
             distanceSeek.progress = selectedKm - 1
+            speedSeek.progress = selectedSpeedKmh - WalkState.MIN_SPEED_KMH
             distanceSeek.isEnabled = false
-            selectedDistanceLabel.text = "$selectedKm km"
-            estimatedTimeLabel.text = formatEstimatedDuration(selectedKm * WalkState.MINUTES_PER_KM)
+            speedSeek.isEnabled = false
+            updateSelectedConfigText()
             button.text = if (selectedMode == WalkState.ActivityMode.RUN) "CANCELAR CORRIDA" else "CANCELAR CAMINHADA"
             button.backgroundTintList = ColorStateList.valueOf(STOP_RED)
             button.setTextColor(Color.WHITE)
         } else {
             distanceSeek.isEnabled = true
+            speedSeek.isEnabled = true
             button.backgroundTintList = ColorStateList.valueOf(IDLE_BLUE)
             button.setTextColor(Color.WHITE)
             updateStartButtonText()
@@ -416,6 +473,7 @@ class MainActivity : ComponentActivity() {
         }
 
         renderHistory()
+        maybeVerifyPendingDiagnostic()
     }
 
     private fun renderHistory() {
@@ -425,21 +483,248 @@ class MainActivity : ComponentActivity() {
         historySection.visibility = if (history.isEmpty()) View.GONE else View.VISIBLE
 
         val signature = history.joinToString("|") {
-            "${it.endedAtMillis}:${it.durationMs}:${it.distanceMeters}:${it.steps}:${it.mode.storedValue}"
+            "${it.startedAtMillis}:${it.endedAtMillis}:${it.durationMs}:${it.distanceMeters}:${it.steps}:${it.mode.storedValue}:${it.speedKmh}:${it.goResult.storedValue}:${it.diagnostic.status}:${it.diagnostic.checkedAtMillis}:${it.diagnostic.confirmedDistanceMeters}:${it.diagnostic.confirmedSteps}"
         }
         if (signature == historySignature) return
         historySignature = signature
+        historyContainer.removeAllViews()
 
-        while (historyTable.childCount > 1) historyTable.removeViewAt(1)
-        history.forEach { entry ->
-            val sec = entry.durationMs / 1000L
-            historyTable.addView(TableRow(this).apply {
-                addView(tableCell(entry.mode.shortLabel))
-                addView(tableCell(formatDuration(sec)))
-                addView(tableCell(String.format(Locale.getDefault(), "%.2f km", entry.distanceMeters / 1000.0)))
-                addView(tableCell(String.format(Locale.getDefault(), "%,d", entry.steps)))
+        val d = resources.displayMetrics.density
+        history.forEachIndexed { index, entry ->
+            val card = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, (8 * d).toInt(), 0, (8 * d).toInt())
+            }
+            card.addView(TextView(this).apply {
+                text = String.format(
+                    Locale.getDefault(),
+                    "%s • %d km/h • %.2f km • %s • %,d passos",
+                    entry.mode.shortLabel,
+                    entry.speedKmh,
+                    entry.distanceMeters / 1000.0,
+                    formatDuration(entry.durationMs / 1_000L),
+                    entry.steps
+                )
+                textSize = 14f
+                setTypeface(typeface, Typeface.BOLD)
             })
+            card.addView(TextView(this).apply {
+                text = diagnosticSummary(entry.diagnostic)
+                textSize = 12f
+                setPadding(0, (4 * d).toInt(), 0, (4 * d).toInt())
+            })
+
+            val resultButtons = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+            }
+            resultButtons.addView(goResultButton(entry, WalkState.GoResult.CREDITED, "GO CREDITOU"), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = (4 * d).toInt()
+            })
+            resultButtons.addView(goResultButton(entry, WalkState.GoResult.NOT_CREDITED, "NÃO CREDITOU"), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = (4 * d).toInt()
+            })
+            card.addView(resultButtons)
+            historyContainer.addView(card, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+            if (index < history.lastIndex) {
+                historyContainer.addView(View(this).apply {
+                    setBackgroundColor(Color.argb(45, 128, 128, 128))
+                }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (1 * d).toInt().coerceAtLeast(1)))
+            }
         }
+    }
+
+    private fun goResultButton(entry: WalkState.HistoryEntry, result: WalkState.GoResult, label: String): Button {
+        val selected = entry.goResult == result
+        val color = when {
+            !selected -> MODE_IDLE_GRAY
+            result == WalkState.GoResult.CREDITED -> GO_GREEN
+            else -> STOP_RED
+        }
+        return Button(this).apply {
+            text = label
+            textSize = 11f
+            setTextColor(Color.WHITE)
+            backgroundTintList = ColorStateList.valueOf(color)
+            setOnClickListener {
+                val next = if (entry.goResult == result) WalkState.GoResult.UNKNOWN else result
+                WalkState.setGoResult(this@MainActivity, entry.startedAtMillis, next)
+                historySignature = "__refresh__"
+                renderHistory()
+            }
+        }
+    }
+
+    private fun diagnosticSummary(diagnostic: WalkState.Diagnostic): String = when (diagnostic.status) {
+        WalkState.DIAGNOSTIC_PENDING -> "HC: aguardando verificação"
+        WalkState.DIAGNOSTIC_CONFIRMED -> String.format(
+            Locale.getDefault(),
+            "HC ✓ %.2f km • %,d passos • D/S/V/E %d/%d/%d/%d",
+            diagnostic.confirmedDistanceMeters / 1000.0,
+            diagnostic.confirmedSteps,
+            diagnostic.distanceRecords,
+            diagnostic.stepsRecords,
+            diagnostic.speedRecords,
+            diagnostic.exerciseRecords
+        )
+        WalkState.DIAGNOSTIC_MISMATCH -> String.format(
+            Locale.getDefault(),
+            "HC ⚠ %.2f km • %,d passos • D/S/V/E %d/%d/%d/%d",
+            diagnostic.confirmedDistanceMeters / 1000.0,
+            diagnostic.confirmedSteps,
+            diagnostic.distanceRecords,
+            diagnostic.stepsRecords,
+            diagnostic.speedRecords,
+            diagnostic.exerciseRecords
+        )
+        WalkState.DIAGNOSTIC_ERROR -> "HC: erro na verificação"
+        else -> "HC: diagnóstico indisponível para esta atividade"
+    }
+
+    private fun maybeVerifyPendingDiagnostic() {
+        val entry = WalkState.pendingDiagnostic(this) ?: return
+        if (!verifyingRunIds.add(entry.startedAtMillis)) return
+        scope.launch {
+            delay(1_500L)
+            verifyHistoryEntry(entry)
+            verifyingRunIds.remove(entry.startedAtMillis)
+            historySignature = "__refresh__"
+            renderHistory()
+        }
+    }
+
+    private suspend fun verifyHistoryEntry(entry: WalkState.HistoryEntry): WalkState.Diagnostic {
+        val diagnostic = try {
+            if (HealthConnectClient.getSdkStatus(this) != HealthConnectClient.SDK_AVAILABLE) {
+                throw IllegalStateException("Health Connect indisponível")
+            }
+            val client = HealthConnectClient.getOrCreate(this)
+            val start = Instant.ofEpochMilli(entry.startedAtMillis).minusSeconds(2L)
+            val end = Instant.ofEpochMilli(entry.startedAtMillis + entry.durationMs).plusSeconds(2L)
+            val range = TimeRangeFilter.between(start, end)
+            val prefix = "pokewalk-${entry.startedAtMillis}-${entry.mode.storedValue}"
+
+            val distanceRecords = client.readRecords(
+                ReadRecordsRequest(DistanceRecord::class, timeRangeFilter = range)
+            ).records.filter { it.metadata.clientRecordId?.startsWith("$prefix-distance-") == true }
+
+            val stepRecords = client.readRecords(
+                ReadRecordsRequest(StepsRecord::class, timeRangeFilter = range)
+            ).records.filter { it.metadata.clientRecordId?.startsWith("$prefix-steps-") == true }
+
+            val speedRecords = client.readRecords(
+                ReadRecordsRequest(SpeedRecord::class, timeRangeFilter = range)
+            ).records.filter { it.metadata.clientRecordId?.startsWith("$prefix-speed-") == true }
+
+            val exerciseRecords = client.readRecords(
+                ReadRecordsRequest(ExerciseSessionRecord::class, timeRangeFilter = range)
+            ).records.filter { it.metadata.clientRecordId == "$prefix-exercise" }
+
+            val confirmedDistance = distanceRecords.sumOf { it.distance.inMeters }
+            val confirmedSteps = stepRecords.sumOf { it.count }
+            var weightedSpeed = 0.0
+            var speedDurationMs = 0L
+            speedRecords.forEach { record ->
+                val average = record.samples.map { it.speed.inKilometersPerHour }.average().takeIf { !it.isNaN() } ?: 0.0
+                val duration = Duration.between(record.startTime, record.endTime).toMillis().coerceAtLeast(1L)
+                weightedSpeed += average * duration
+                speedDurationMs += duration
+            }
+            val averageSpeed = if (speedDurationMs > 0L) weightedSpeed / speedDurationMs else 0.0
+            val allMetadata = buildList {
+                addAll(distanceRecords.map { it.metadata })
+                addAll(stepRecords.map { it.metadata })
+                addAll(speedRecords.map { it.metadata })
+                addAll(exerciseRecords.map { it.metadata })
+            }
+            val origin = allMetadata.map { it.dataOrigin.packageName }.filter { it.isNotBlank() }.distinct().joinToString(", ")
+            val recordingMethod = allMetadata.firstOrNull()?.recordingMethod ?: 0
+
+            val distanceOk = abs(confirmedDistance - entry.distanceMeters) <= maxOf(2.0, entry.distanceMeters * 0.005)
+            val stepsOk = abs(confirmedSteps - entry.steps) <= 1L
+            val recordsOk = distanceRecords.isNotEmpty() && stepRecords.isNotEmpty() && speedRecords.isNotEmpty() && exerciseRecords.isNotEmpty()
+            WalkState.Diagnostic(
+                status = if (distanceOk && stepsOk && recordsOk) WalkState.DIAGNOSTIC_CONFIRMED else WalkState.DIAGNOSTIC_MISMATCH,
+                checkedAtMillis = System.currentTimeMillis(),
+                confirmedDistanceMeters = confirmedDistance,
+                confirmedSteps = confirmedSteps,
+                distanceRecords = distanceRecords.size,
+                stepsRecords = stepRecords.size,
+                speedRecords = speedRecords.size,
+                exerciseRecords = exerciseRecords.size,
+                averageSpeedKmh = averageSpeed,
+                origin = origin,
+                recordingMethod = recordingMethod
+            )
+        } catch (t: Throwable) {
+            WalkState.Diagnostic(
+                status = WalkState.DIAGNOSTIC_ERROR,
+                checkedAtMillis = System.currentTimeMillis(),
+                error = t.message ?: t.javaClass.simpleName
+            )
+        }
+        WalkState.updateDiagnostic(this, entry.startedAtMillis, diagnostic)
+        return diagnostic
+    }
+
+    private fun showLatestDiagnostic() {
+        val entry = WalkState.history(this).firstOrNull()
+        if (entry == null) {
+            showMessage("Faça uma atividade primeiro.")
+            return
+        }
+        if (!verifyingRunIds.add(entry.startedAtMillis)) {
+            showMessage("Verificação em andamento.")
+            return
+        }
+        scope.launch {
+            val diagnostic = verifyHistoryEntry(entry)
+            verifyingRunIds.remove(entry.startedAtMillis)
+            historySignature = "__refresh__"
+            renderHistory()
+            showDiagnosticDialog(entry.copy(diagnostic = diagnostic))
+        }
+    }
+
+    private fun showDiagnosticDialog(entry: WalkState.HistoryEntry) {
+        val d = entry.diagnostic
+        val status = when (d.status) {
+            WalkState.DIAGNOSTIC_CONFIRMED -> "CONFIRMADO"
+            WalkState.DIAGNOSTIC_MISMATCH -> "DIVERGÊNCIA"
+            WalkState.DIAGNOSTIC_ERROR -> "ERRO"
+            WalkState.DIAGNOSTIC_PENDING -> "PENDENTE"
+            else -> "INDISPONÍVEL"
+        }
+        val method = when (d.recordingMethod) {
+            1 -> "Ativamente gravado"
+            2 -> "Automaticamente gravado"
+            3 -> "Entrada manual"
+            else -> "Desconhecido"
+        }
+        val go = when (entry.goResult) {
+            WalkState.GoResult.CREDITED -> "Creditou"
+            WalkState.GoResult.NOT_CREDITED -> "Não creditou"
+            WalkState.GoResult.UNKNOWN -> "Ainda não informado"
+        }
+        val message = buildString {
+            append("Tipo: ${entry.mode.label}\n")
+            append("Velocidade alvo: ${entry.speedKmh} km/h\n")
+            append(String.format(Locale.getDefault(), "Esperado: %.2f km • %,d passos\n", entry.distanceMeters / 1000.0, entry.steps))
+            append("Duração: ${formatDuration(entry.durationMs / 1_000L)}\n\n")
+            append("Health Connect: $status\n")
+            append(String.format(Locale.getDefault(), "Lido: %.2f km • %,d passos\n", d.confirmedDistanceMeters / 1000.0, d.confirmedSteps))
+            append(String.format(Locale.getDefault(), "Velocidade média lida: %.2f km/h\n", d.averageSpeedKmh))
+            append("Records D/S/V/E: ${d.distanceRecords}/${d.stepsRecords}/${d.speedRecords}/${d.exerciseRecords}\n")
+            append("Origem: ${d.origin.ifBlank { "—" }}\n")
+            append("Método: $method\n")
+            if (!d.error.isNullOrBlank()) append("Erro: ${d.error}\n")
+            append("\nPokémon GO: $go")
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Diagnóstico da última atividade")
+            .setMessage(message)
+            .setPositiveButton("OK", null)
+            .show()
     }
 
     private fun formatDuration(totalSeconds: Long): String {
@@ -491,7 +776,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startActivityRun() {
-        WalkState.begin(this, selectedKm, selectedMode)
+        WalkState.begin(this, selectedKm, selectedMode, selectedSpeedKmh)
         ContextCompat.startForegroundService(this, Intent(this, WalkService::class.java))
         render()
     }
@@ -499,6 +784,15 @@ class MainActivity : ComponentActivity() {
     private fun stopActivityRun() {
         if (!WalkState.isRunning(this)) return
         startService(Intent(this, WalkService::class.java).apply { action = WalkService.ACTION_STOP })
+    }
+
+    private fun appVersionLabel(): String {
+        val version = try {
+            packageManager.getPackageInfo(packageName, 0).versionName ?: "?"
+        } catch (_: Throwable) {
+            "?"
+        }
+        return "v$version"
     }
 
     private fun showMessage(message: String) {
@@ -515,5 +809,6 @@ class MainActivity : ComponentActivity() {
         private val IDLE_BLUE = Color.rgb(25, 118, 210)
         private val MODE_IDLE_GRAY = Color.rgb(97, 97, 97)
         private val STOP_RED = Color.rgb(198, 40, 40)
+        private val GO_GREEN = Color.rgb(46, 125, 50)
     }
 }
