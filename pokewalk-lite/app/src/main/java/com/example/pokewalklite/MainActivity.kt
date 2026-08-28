@@ -183,13 +183,7 @@ class MainActivity : ComponentActivity() {
         }
         root.addView(button, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
-        status = TextView(this).apply {
-            text = "Pronto."
-            textSize = 15f
-            gravity = Gravity.CENTER
-            setPadding(0, sectionPad, 0, sectionPad)
-        }
-        root.addView(status)
+        status = TextView(this)
 
         historySection = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -214,6 +208,7 @@ class MainActivity : ComponentActivity() {
             }
         })
         historySection.addView(historyTitleRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = sectionPad
             bottomMargin = (8 * d).toInt()
         })
 
