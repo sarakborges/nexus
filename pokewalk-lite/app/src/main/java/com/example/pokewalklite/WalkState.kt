@@ -13,6 +13,20 @@ object WalkState {
     const val METERS_PER_MINUTE = 125.0
     private const val BASE_STEPS_PER_MINUTE = 163
 
+    enum class ActivityMode(
+        val storedValue: String,
+        val label: String,
+        val shortLabel: String
+    ) {
+        WALK("walk", "Caminhada", "CAM."),
+        RUN("run", "Corrida", "COR.");
+
+        companion object {
+            fun fromStored(value: String?): ActivityMode =
+                entries.firstOrNull { it.storedValue == value } ?: WALK
+        }
+    }
+
     private const val PREFS = "pokewalk_state"
     private const val KEY_RUNNING = "running"
     private const val KEY_START_TIME = "start_time"
@@ -22,6 +36,8 @@ object WalkState {
     private const val KEY_ERROR = "error"
     private const val KEY_TARGET_KM = "target_km"
     private const val KEY_PREFERRED_KM = "preferred_km"
+    private const val KEY_TARGET_MODE = "target_mode"
+    private const val KEY_PREFERRED_MODE = "preferred_mode"
     private const val KEY_STEP_PLAN = "step_plan"
     private const val KEY_FINAL_DURATION = "final_duration"
     private const val KEY_FINAL_DISTANCE = "final_distance"
@@ -39,10 +55,16 @@ object WalkState {
         val endedAtMillis: Long,
         val durationMs: Long,
         val distanceMeters: Double,
-        val steps: Long
+        val steps: Long,
+        val mode: ActivityMode
     )
 
-    fun begin(context: Context, distanceKm: Int, startTimeMillis: Long = System.currentTimeMillis()) {
+    fun begin(
+        context: Context,
+        distanceKm: Int,
+        mode: ActivityMode = preferredMode(context),
+        startTimeMillis: Long = System.currentTimeMillis()
+    ) {
         val km = distanceKm.coerceIn(1, 20)
         val chunks = km * MINUTES_PER_KM
         val plan = List(chunks) { (BASE_STEPS_PER_MINUTE + Random.nextInt(-5, 6)).coerceAtLeast(1) }
@@ -54,6 +76,8 @@ object WalkState {
             .putBoolean(KEY_STOPPED, false)
             .putInt(KEY_TARGET_KM, km)
             .putInt(KEY_PREFERRED_KM, km)
+            .putString(KEY_TARGET_MODE, mode.storedValue)
+            .putString(KEY_PREFERRED_MODE, mode.storedValue)
             .putString(KEY_STEP_PLAN, plan.joinToString(","))
             .putLong(KEY_FINAL_DURATION, 0L)
             .putString(KEY_FINAL_DISTANCE, "0")
@@ -68,7 +92,7 @@ object WalkState {
         val existing = p.getLong(KEY_START_TIME, 0L)
         if (p.getBoolean(KEY_RUNNING, false) && existing > 0L) return existing
         val now = System.currentTimeMillis()
-        begin(context, preferredDistanceKm(context), now)
+        begin(context, preferredDistanceKm(context), preferredMode(context), now)
         return now
     }
 
@@ -76,8 +100,14 @@ object WalkState {
         prefs(context).edit().putInt(KEY_PREFERRED_KM, km.coerceIn(1, 20)).apply()
     }
 
+    fun setPreferredMode(context: Context, mode: ActivityMode) {
+        prefs(context).edit().putString(KEY_PREFERRED_MODE, mode.storedValue).apply()
+    }
+
     fun preferredDistanceKm(context: Context): Int = prefs(context).getInt(KEY_PREFERRED_KM, 5).coerceIn(1, 20)
     fun targetDistanceKm(context: Context): Int = prefs(context).getInt(KEY_TARGET_KM, preferredDistanceKm(context)).coerceIn(1, 20)
+    fun preferredMode(context: Context): ActivityMode = ActivityMode.fromStored(prefs(context).getString(KEY_PREFERRED_MODE, null))
+    fun targetMode(context: Context): ActivityMode = ActivityMode.fromStored(prefs(context).getString(KEY_TARGET_MODE, preferredMode(context).storedValue))
     fun targetDistanceMeters(context: Context): Double = targetDistanceKm(context) * 1000.0
     fun chunkCount(context: Context): Int = targetDistanceKm(context) * MINUTES_PER_KM
     fun totalDurationMs(context: Context): Long = chunkCount(context) * 60_000L
@@ -127,7 +157,15 @@ object WalkState {
         )
     }
 
-    private fun saveResult(context: Context, durationMs: Long, distanceMeters: Double, steps: Long, finished: Boolean, stopped: Boolean) {
+    private fun saveResult(
+        context: Context,
+        durationMs: Long,
+        distanceMeters: Double,
+        steps: Long,
+        finished: Boolean,
+        stopped: Boolean
+    ) {
+        val mode = targetMode(context)
         prefs(context).edit()
             .putBoolean(KEY_RUNNING, false)
             .putBoolean(KEY_FINISHED, finished)
@@ -137,7 +175,7 @@ object WalkState {
             .putLong(KEY_FINAL_STEPS, steps)
             .remove(KEY_ERROR)
             .apply()
-        addHistoryOnce(context, HistoryEntry(System.currentTimeMillis(), durationMs, distanceMeters, steps))
+        addHistoryOnce(context, HistoryEntry(System.currentTimeMillis(), durationMs, distanceMeters, steps, mode))
     }
 
     private fun addHistoryOnce(context: Context, entry: HistoryEntry) {
@@ -159,6 +197,7 @@ object WalkState {
                 put("duration", entry.durationMs)
                 put("distance", entry.distanceMeters)
                 put("steps", entry.steps)
+                put("mode", entry.mode.storedValue)
             })
         }
         prefs(context).edit().putString(KEY_HISTORY, array.toString()).apply()
@@ -181,7 +220,8 @@ object WalkState {
                             endedAtMillis = item.optLong("endedAt"),
                             durationMs = item.optLong("duration"),
                             distanceMeters = item.optDouble("distance"),
-                            steps = item.optLong("steps")
+                            steps = item.optLong("steps"),
+                            mode = ActivityMode.fromStored(item.optString("mode", ActivityMode.WALK.storedValue))
                         )
                     )
                 }
