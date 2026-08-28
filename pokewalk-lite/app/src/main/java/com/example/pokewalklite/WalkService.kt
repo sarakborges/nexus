@@ -87,7 +87,8 @@ class WalkService : Service() {
                     )
                 )
 
-                client.insertRecords(listOf(distance, steps))
+                client.insertRecords(listOf(distance))
+                client.insertRecords(listOf(steps))
                 WalkState.markChunkWritten(this, index + 1)
                 updateNotification(index + 1)
             }
