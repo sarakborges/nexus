@@ -11,6 +11,7 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.records.DistanceRecord
+import androidx.health.connect.client.records.ExerciseSessionRecord
 import androidx.health.connect.client.records.StepsRecord
 import androidx.health.connect.client.records.metadata.Device
 import androidx.health.connect.client.records.metadata.Metadata
@@ -29,7 +30,6 @@ import kotlinx.coroutines.withContext
 import java.time.Instant
 import java.time.ZoneId
 import java.util.Locale
-import java.util.UUID
 
 class WalkService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -44,20 +44,20 @@ class WalkService : Service() {
             manager.createNotificationChannel(
                 NotificationChannel(
                     ACTIVE_CHANNEL_ID,
-                    "Caminhada em andamento",
+                    "Atividade em andamento",
                     NotificationManager.IMPORTANCE_LOW
                 ).apply {
-                    description = "Contador permanente das caminhadas do PokeWalk"
+                    description = "Contador permanente das atividades do PokeWalk"
                     setShowBadge(false)
                 }
             )
             manager.createNotificationChannel(
                 NotificationChannel(
                     RESULT_CHANNEL_ID,
-                    "Resultado das caminhadas",
+                    "Resultado das atividades",
                     NotificationManager.IMPORTANCE_DEFAULT
                 ).apply {
-                    description = "Notificação simples quando uma caminhada termina"
+                    description = "Notificação simples quando uma atividade termina"
                 }
             )
         }
@@ -75,7 +75,7 @@ class WalkService : Service() {
         val start = WalkState.ensureStarted(this)
         startAsForeground(start)
         startNotificationTicker(start)
-        job = scope.launch { runWalk(start) }
+        job = scope.launch { runActivity(start) }
         return START_STICKY
     }
 
@@ -96,6 +96,7 @@ class WalkService : Service() {
         val totalMs = WalkState.totalDurationMs(this).coerceAtLeast(1L)
         val elapsedMs = (System.currentTimeMillis() - startMillis).coerceIn(0L, totalMs)
         val metrics = WalkState.metricsAt(this, elapsedMs)
+        val mode = WalkState.targetMode(this)
         val elapsedSeconds = (elapsedMs / 1_000L).toInt()
         val totalSeconds = (totalMs / 1_000L).toInt().coerceAtLeast(1)
         val text = String.format(
@@ -108,7 +109,7 @@ class WalkService : Service() {
 
         return NotificationCompat.Builder(this, ACTIVE_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_media_play)
-            .setContentTitle("PokeWalk Lite")
+            .setContentTitle("PokeWalk Lite • ${mode.label}")
             .setContentText(text)
             .setContentIntent(openAppPendingIntent())
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
@@ -167,9 +168,10 @@ class WalkService : Service() {
         }
     }
 
-    private suspend fun runWalk(startMillis: Long) {
+    private suspend fun runActivity(startMillis: Long) {
         val client = HealthConnectClient.getOrCreate(this)
-        val sessionId = UUID.randomUUID().toString()
+        val mode = WalkState.targetMode(this)
+        val sessionId = "pokewalk-$startMillis-${mode.storedValue}"
         val sessionStart = Instant.ofEpochMilli(startMillis)
         val plan = WalkState.stepPlan(this)
         val chunks = WalkState.chunkCount(this)
@@ -197,8 +199,10 @@ class WalkService : Service() {
                 WalkState.markChunkWritten(this, index + 1)
             }
 
+            val sessionEnd = sessionStart.plusSeconds(chunks * 60L)
+            writeExerciseSession(client, sessionId, sessionStart, sessionEnd, mode)
             WalkState.finish(this)
-            resultTitle = "Caminhada concluída"
+            resultTitle = "${mode.label} concluída"
             resultMetrics = WalkState.finalMetrics(this)
         } catch (cancelled: CancellationException) {
             if (!stopRequested) throw cancelled
@@ -207,9 +211,9 @@ class WalkService : Service() {
         } finally {
             if (stopRequested) {
                 resultMetrics = withContext(NonCancellable) {
-                    finalizeStoppedWalk(client, sessionStart, sessionId)
+                    finalizeStoppedActivity(client, sessionStart, sessionId, mode)
                 }
-                resultTitle = "Progresso salvo"
+                resultTitle = "${mode.label} salva"
             }
 
             notificationTicker?.cancel()
@@ -224,10 +228,11 @@ class WalkService : Service() {
         }
     }
 
-    private suspend fun finalizeStoppedWalk(
+    private suspend fun finalizeStoppedActivity(
         client: HealthConnectClient,
         sessionStart: Instant,
-        sessionId: String
+        sessionId: String,
+        mode: WalkState.ActivityMode
     ): WalkState.Metrics {
         val totalDuration = WalkState.totalDurationMs(this)
         val durationMs = (System.currentTimeMillis() - sessionStart.toEpochMilli()).coerceIn(0L, totalDuration)
@@ -236,7 +241,6 @@ class WalkService : Service() {
         val elapsedFullMinutes = (durationMs / 60_000L).toInt().coerceIn(0, chunks)
         var completed = WalkState.completedChunks(this).coerceIn(0, chunks)
 
-        // Reconcile any complete minutes that elapsed but were not persisted yet.
         for (index in completed until elapsedFullMinutes) {
             val intervalStart = sessionStart.plusSeconds(index * 60L)
             val intervalEnd = sessionStart.plusSeconds((index + 1) * 60L)
@@ -253,7 +257,6 @@ class WalkService : Service() {
             completed = index + 1
         }
 
-        // Persist the fraction of the current minute too.
         val remainingMs = durationMs % 60_000L
         if (remainingMs > 0L && elapsedFullMinutes < chunks) {
             val partialIndex = elapsedFullMinutes
@@ -274,9 +277,47 @@ class WalkService : Service() {
             )
         }
 
+        if (durationMs > 0L) {
+            val sessionEnd = Instant.ofEpochMilli(sessionStart.toEpochMilli() + durationMs)
+            writeExerciseSession(client, sessionId, sessionStart, sessionEnd, mode)
+        }
+
         val metrics = WalkState.metricsAt(this, durationMs)
         WalkState.stop(this, metrics.durationMs, metrics.distanceMeters, metrics.steps)
         return metrics
+    }
+
+    private suspend fun writeExerciseSession(
+        client: HealthConnectClient,
+        sessionId: String,
+        startTime: Instant,
+        endTime: Instant,
+        mode: WalkState.ActivityMode
+    ) {
+        if (!endTime.isAfter(startTime)) return
+        val zone = ZoneId.systemDefault()
+        val device = Device(type = Device.TYPE_PHONE)
+        val exerciseType = if (mode == WalkState.ActivityMode.RUN) {
+            ExerciseSessionRecord.EXERCISE_TYPE_RUNNING
+        } else {
+            ExerciseSessionRecord.EXERCISE_TYPE_WALKING
+        }
+
+        client.insertRecords(
+            listOf(
+                ExerciseSessionRecord(
+                    startTime = startTime,
+                    startZoneOffset = zone.rules.getOffset(startTime),
+                    endTime = endTime,
+                    endZoneOffset = zone.rules.getOffset(endTime),
+                    metadata = Metadata.activelyRecorded(
+                        device = device,
+                        clientRecordId = "$sessionId-exercise"
+                    ),
+                    exerciseType = exerciseType
+                )
+            )
+        )
     }
 
     private suspend fun writeChunk(
