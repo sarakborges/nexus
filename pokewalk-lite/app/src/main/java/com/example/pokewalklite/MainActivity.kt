@@ -6,8 +6,10 @@ import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
+import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.LinearLayout
@@ -18,6 +20,7 @@ import android.widget.TableRow
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.PermissionController
@@ -46,12 +49,11 @@ class MainActivity : ComponentActivity() {
     private lateinit var distanceSeek: SeekBar
     private lateinit var selectedDistanceLabel: TextView
     private lateinit var subtitle: TextView
+    private lateinit var historySection: LinearLayout
     private lateinit var historyTable: TableLayout
 
     private var selectedKm = 5
     private var historySignature = ""
-    private var defaultButtonTint: ColorStateList? = null
-    private lateinit var defaultButtonTextColors: ColorStateList
 
     private val healthPermissions = setOf(
         HealthPermission.getWritePermission(StepsRecord::class),
@@ -61,34 +63,38 @@ class MainActivity : ComponentActivity() {
     private val healthPermissionLauncher = registerForActivityResult(
         PermissionController.createRequestPermissionResultContract()
     ) { granted ->
-        if (granted.containsAll(healthPermissions)) ensureActivityPermissionAndStart()
-        else {
-            status.text = "Permita passos e distância no Health Connect."
-            render()
-        }
+        if (granted.containsAll(healthPermissions)) ensureNotificationPermissionAndStart()
+        else status.text = "Permita passos e distância no Health Connect."
+    }
+
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) ensureActivityPermissionAndStart()
+        else status.text = "Permita notificações para iniciar a caminhada."
     }
 
     private val activityRecognitionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) startWalk()
-        else {
-            status.text = "Permissão de atividade necessária."
-            render()
-        }
+        else status.text = "Permissão de atividade necessária."
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val d = resources.displayMetrics.density
-        val pad = (24 * d).toInt()
+        val horizontalPad = (24 * d).toInt()
+        val topPad = (32 * d).toInt()
+        val bottomPad = (40 * d).toInt()
+        val sectionPad = (24 * d).toInt()
         selectedKm = WalkState.preferredDistanceKm(this)
 
         val scroll = ScrollView(this).apply { isFillViewport = true }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(pad, pad, pad, pad)
+            setPadding(horizontalPad, topPad, horizontalPad, bottomPad)
         }
         scroll.addView(root, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
@@ -102,17 +108,16 @@ class MainActivity : ComponentActivity() {
         subtitle = TextView(this).apply {
             textSize = 17f
             gravity = Gravity.CENTER
-            setPadding(0, (8 * d).toInt(), 0, pad)
+            setPadding(0, (8 * d).toInt(), 0, sectionPad)
         }
         root.addView(subtitle)
 
-        val selectorTitle = TextView(this).apply {
+        root.addView(TextView(this).apply {
             text = "DISTÂNCIA"
             textSize = 12f
             setTypeface(typeface, Typeface.BOLD)
             gravity = Gravity.CENTER
-        }
-        root.addView(selectorTitle)
+        })
 
         selectedDistanceLabel = TextView(this).apply {
             textSize = 24f
@@ -129,16 +134,14 @@ class MainActivity : ComponentActivity() {
         }
         root.addView(distanceSeek, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
-        val endpoints = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
+        val endpoints = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         endpoints.addView(TextView(this).apply { text = "1 km" }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         endpoints.addView(TextView(this).apply {
             text = "20 km"
             gravity = Gravity.END
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         root.addView(endpoints, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-            bottomMargin = pad
+            bottomMargin = sectionPad
         })
 
         distanceSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
@@ -160,40 +163,60 @@ class MainActivity : ComponentActivity() {
         distance = addMetric(metrics, "DISTÂNCIA", "0,00 km")
         steps = addMetric(metrics, "PASSOS", "0")
         root.addView(metrics, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-            bottomMargin = pad
+            bottomMargin = sectionPad
         })
 
         button = Button(this).apply {
             textSize = 18f
             minHeight = (56 * d).toInt()
+            backgroundTintList = ColorStateList.valueOf(IDLE_BLUE)
+            setTextColor(Color.WHITE)
             setOnClickListener {
                 if (WalkState.isRunning(this@MainActivity)) stopWalk() else prepareWalk()
             }
         }
-        defaultButtonTint = button.backgroundTintList
-        defaultButtonTextColors = button.textColors
         root.addView(button, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         status = TextView(this).apply {
             text = "Pronto."
             textSize = 15f
             gravity = Gravity.CENTER
-            setPadding(0, pad, 0, pad)
+            setPadding(0, sectionPad, 0, sectionPad)
         }
         root.addView(status)
 
-        root.addView(TextView(this).apply {
+        historySection = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }
+
+        val historyTitleRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        historyTitleRow.addView(TextView(this).apply {
             text = "Últimas caminhadas"
             textSize = 20f
             setTypeface(typeface, Typeface.BOLD)
-            setPadding(0, (8 * d).toInt(), 0, (12 * d).toInt())
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        historyTitleRow.addView(Button(this).apply {
+            text = "LIMPAR"
+            setOnClickListener {
+                WalkState.clearHistory(this@MainActivity)
+                historySignature = "__refresh__"
+                renderHistory()
+            }
+        })
+        historySection.addView(historyTitleRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = (8 * d).toInt()
         })
 
         historyTable = TableLayout(this).apply {
             isStretchAllColumns = true
             addView(historyHeader())
         }
-        root.addView(historyTable, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        historySection.addView(historyTable, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        root.addView(historySection, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         setContentView(scroll)
         updateSelectedDistanceText()
@@ -234,10 +257,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun tableCell(value: String, bold: Boolean = false): TextView = TextView(this).apply {
+        val d = resources.displayMetrics.density
         text = value
         textSize = if (bold) 12f else 15f
         gravity = Gravity.CENTER
-        setPadding(4, 12, 4, 12)
+        setPadding((4 * d).toInt(), (10 * d).toInt(), (4 * d).toInt(), (10 * d).toInt())
         if (bold) setTypeface(typeface, Typeface.BOLD)
     }
 
@@ -271,11 +295,7 @@ class MainActivity : ComponentActivity() {
         }
 
         val sec = metrics.durationMs / 1000L
-        elapsed.text = if (sec >= 3600L) {
-            String.format(Locale.getDefault(), "%02d:%02d:%02d", sec / 3600L, (sec % 3600L) / 60L, sec % 60L)
-        } else {
-            String.format(Locale.getDefault(), "%02d:%02d", sec / 60L, sec % 60L)
-        }
+        elapsed.text = formatDuration(sec)
         distance.text = String.format(Locale.getDefault(), "%.2f km", metrics.distanceMeters / 1000.0)
         steps.text = String.format(Locale.getDefault(), "%,d", metrics.steps)
 
@@ -286,12 +306,12 @@ class MainActivity : ComponentActivity() {
             selectedDistanceLabel.text = "$selectedKm km"
             subtitle.text = "10 km/h • ${selectedKm * WalkState.MINUTES_PER_KM} min"
             button.text = "PARAR DE CAMINHAR"
-            button.backgroundTintList = ColorStateList.valueOf(Color.rgb(198, 40, 40))
+            button.backgroundTintList = ColorStateList.valueOf(STOP_RED)
             button.setTextColor(Color.WHITE)
         } else {
             distanceSeek.isEnabled = true
-            button.backgroundTintList = defaultButtonTint
-            button.setTextColor(defaultButtonTextColors)
+            button.backgroundTintList = ColorStateList.valueOf(IDLE_BLUE)
+            button.setTextColor(Color.WHITE)
             button.text = "CAMINHAR $selectedKm KM"
         }
 
@@ -308,34 +328,30 @@ class MainActivity : ComponentActivity() {
 
     private fun renderHistory() {
         val history = WalkState.history(this)
+            .sortedByDescending { it.endedAtMillis }
+            .take(5)
+        historySection.visibility = if (history.isEmpty()) View.GONE else View.VISIBLE
+
         val signature = history.joinToString("|") { "${it.endedAtMillis}:${it.durationMs}:${it.distanceMeters}:${it.steps}" }
         if (signature == historySignature) return
         historySignature = signature
 
         while (historyTable.childCount > 1) historyTable.removeViewAt(1)
-        if (history.isEmpty()) {
-            historyTable.addView(TableRow(this).apply {
-                addView(TextView(this@MainActivity).apply {
-                    text = "Nenhuma caminhada ainda."
-                    gravity = Gravity.CENTER
-                    setPadding(4, 18, 4, 18)
-                }, TableRow.LayoutParams().apply { span = 3 })
-            })
-            return
-        }
-
         history.forEach { entry ->
             val sec = entry.durationMs / 1000L
-            val time = if (sec >= 3600L) {
-                String.format(Locale.getDefault(), "%02d:%02d:%02d", sec / 3600L, (sec % 3600L) / 60L, sec % 60L)
-            } else {
-                String.format(Locale.getDefault(), "%02d:%02d", sec / 60L, sec % 60L)
-            }
             historyTable.addView(TableRow(this).apply {
-                addView(tableCell(time))
+                addView(tableCell(formatDuration(sec)))
                 addView(tableCell(String.format(Locale.getDefault(), "%.2f km", entry.distanceMeters / 1000.0)))
                 addView(tableCell(String.format(Locale.getDefault(), "%,d", entry.steps)))
             })
+        }
+    }
+
+    private fun formatDuration(totalSeconds: Long): String {
+        return if (totalSeconds >= 3600L) {
+            String.format(Locale.getDefault(), "%02d:%02d:%02d", totalSeconds / 3600L, (totalSeconds % 3600L) / 60L, totalSeconds % 60L)
+        } else {
+            String.format(Locale.getDefault(), "%02d:%02d", totalSeconds / 60L, totalSeconds % 60L)
         }
     }
 
@@ -351,13 +367,30 @@ class MainActivity : ComponentActivity() {
         val client = HealthConnectClient.getOrCreate(this)
         scope.launch {
             val granted = client.permissionController.getGrantedPermissions()
-            if (granted.containsAll(healthPermissions)) ensureActivityPermissionAndStart()
+            if (granted.containsAll(healthPermissions)) ensureNotificationPermissionAndStart()
             else healthPermissionLauncher.launch(healthPermissions)
         }
     }
 
+    private fun ensureNotificationPermissionAndStart() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            status.text = "Permita notificações para mostrar o contador permanente."
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            return
+        }
+
+        if (!NotificationManagerCompat.from(this).areNotificationsEnabled()) {
+            status.text = "Ative as notificações do PokeWalk nas configurações do Android."
+            return
+        }
+
+        ensureActivityPermissionAndStart()
+    }
+
     private fun ensureActivityPermissionAndStart() {
-        if (android.os.Build.VERSION.SDK_INT >= 29 &&
+        if (Build.VERSION.SDK_INT >= 29 &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION) != PackageManager.PERMISSION_GRANTED
         ) {
             activityRecognitionLauncher.launch(Manifest.permission.ACTIVITY_RECOGNITION)
@@ -380,5 +413,10 @@ class MainActivity : ComponentActivity() {
         ticker?.cancel()
         scope.cancel()
         super.onDestroy()
+    }
+
+    companion object {
+        private val IDLE_BLUE = Color.rgb(25, 118, 210)
+        private val STOP_RED = Color.rgb(198, 40, 40)
     }
 }
