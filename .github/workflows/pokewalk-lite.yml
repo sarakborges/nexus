@@ -10,6 +10,11 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      POKEWALK_KEYSTORE_BASE64: ${{ secrets.POKEWALK_KEYSTORE_BASE64 }}
+      POKEWALK_KEYSTORE_PASSWORD: ${{ secrets.POKEWALK_KEYSTORE_PASSWORD }}
+      POKEWALK_KEY_ALIAS: ${{ secrets.POKEWALK_KEY_ALIAS }}
+      POKEWALK_KEY_PASSWORD: ${{ secrets.POKEWALK_KEY_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,30 +44,24 @@ jobs:
         run: cp pokewalk-lite/app/build/outputs/apk/release/app-release-unsigned.apk PokeWalkLite-unsigned.apk
 
       - name: Restore stable signing key
-        if: ${{ secrets.POKEWALK_KEYSTORE_BASE64 != '' }}
-        env:
-          KEYSTORE_BASE64: ${{ secrets.POKEWALK_KEYSTORE_BASE64 }}
+        if: ${{ env.POKEWALK_KEYSTORE_BASE64 != '' }}
         run: |
-          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/pokewalk-lite-signing.p12"
+          printf '%s' "$POKEWALK_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/pokewalk-lite-signing.p12"
 
       - name: Sign APK with stable key
-        if: ${{ secrets.POKEWALK_KEYSTORE_BASE64 != '' }}
-        env:
-          KEYSTORE_PASSWORD: ${{ secrets.POKEWALK_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.POKEWALK_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.POKEWALK_KEY_PASSWORD }}
+        if: ${{ env.POKEWALK_KEYSTORE_BASE64 != '' }}
         run: |
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign \
             --ks "$RUNNER_TEMP/pokewalk-lite-signing.p12" \
-            --ks-pass env:KEYSTORE_PASSWORD \
-            --ks-key-alias "$KEY_ALIAS" \
-            --key-pass env:KEY_PASSWORD \
+            --ks-pass env:POKEWALK_KEYSTORE_PASSWORD \
+            --ks-key-alias "$POKEWALK_KEY_ALIAS" \
+            --key-pass env:POKEWALK_KEY_PASSWORD \
             --out PokeWalkLite.apk \
             PokeWalkLite-unsigned.apk
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs PokeWalkLite.apk
 
       - name: Upload signed APK
-        if: ${{ secrets.POKEWALK_KEYSTORE_BASE64 != '' }}
+        if: ${{ env.POKEWALK_KEYSTORE_BASE64 != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: PokeWalkLite-apk
