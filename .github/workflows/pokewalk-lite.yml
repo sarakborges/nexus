@@ -1,0 +1,45 @@
+name: Build PokeWalk Lite APK
+
+on:
+  push:
+    paths:
+      - "pokewalk-lite/**"
+      - ".github/workflows/pokewalk-lite.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle 9.5
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.5.0"
+
+      - name: Decode source archive
+        run: |
+          base64 -d pokewalk-lite/PokeWalkLite-corrected.zip.b64 > /tmp/PokeWalkLite.zip
+          unzip -q /tmp/PokeWalkLite.zip -d /tmp/pokewalk-src
+
+      - name: Build debug APK
+        working-directory: /tmp/pokewalk-src/PokeWalkLite
+        run: gradle --no-daemon :app:assembleDebug
+
+      - name: Rename APK
+        run: cp /tmp/pokewalk-src/PokeWalkLite/app/build/outputs/apk/debug/app-debug.apk PokeWalkLite.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: PokeWalkLite-apk
+          path: PokeWalkLite.apk
+          if-no-files-found: error
