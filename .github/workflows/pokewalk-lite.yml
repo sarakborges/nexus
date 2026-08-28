@@ -10,11 +10,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      POKEWALK_KEYSTORE_BASE64: ${{ secrets.POKEWALK_KEYSTORE_BASE64 }}
-      POKEWALK_KEYSTORE_PASSWORD: ${{ secrets.POKEWALK_KEYSTORE_PASSWORD }}
-      POKEWALK_KEY_ALIAS: ${{ secrets.POKEWALK_KEY_ALIAS }}
-      POKEWALK_KEY_PASSWORD: ${{ secrets.POKEWALK_KEY_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -43,34 +38,23 @@ jobs:
       - name: Copy unsigned APK
         run: cp pokewalk-lite/app/build/outputs/apk/release/app-release-unsigned.apk PokeWalkLite-unsigned.apk
 
-      - name: Restore stable signing key
-        if: ${{ env.POKEWALK_KEYSTORE_BASE64 != '' }}
+      - name: Package Android signing tools
         run: |
-          printf '%s' "$POKEWALK_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/pokewalk-lite-signing.p12"
-
-      - name: Sign APK with stable key
-        if: ${{ env.POKEWALK_KEYSTORE_BASE64 != '' }}
-        run: |
-          "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign \
-            --ks "$RUNNER_TEMP/pokewalk-lite-signing.p12" \
-            --ks-pass env:POKEWALK_KEYSTORE_PASSWORD \
-            --ks-key-alias "$POKEWALK_KEY_ALIAS" \
-            --key-pass env:POKEWALK_KEY_PASSWORD \
-            --out PokeWalkLite.apk \
-            PokeWalkLite-unsigned.apk
-          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs PokeWalkLite.apk
-
-      - name: Upload signed APK
-        if: ${{ env.POKEWALK_KEYSTORE_BASE64 != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: PokeWalkLite-apk
-          path: PokeWalkLite.apk
-          if-no-files-found: error
+          mkdir -p android-signing-tools/lib
+          cp "$ANDROID_HOME/build-tools/36.0.0/apksigner" android-signing-tools/
+          cp "$ANDROID_HOME/build-tools/36.0.0/zipalign" android-signing-tools/
+          cp "$ANDROID_HOME/build-tools/36.0.0/lib/apksigner.jar" android-signing-tools/lib/
 
       - name: Upload unsigned APK
         uses: actions/upload-artifact@v4
         with:
           name: PokeWalkLite-unsigned-apk
           path: PokeWalkLite-unsigned.apk
+          if-no-files-found: error
+
+      - name: Upload Android signing tools
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-signing-tools
+          path: android-signing-tools
           if-no-files-found: error
