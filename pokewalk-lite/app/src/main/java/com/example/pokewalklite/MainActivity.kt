@@ -50,6 +50,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var steps: TextView
     private lateinit var distanceSeek: SeekBar
     private lateinit var selectedDistanceLabel: TextView
+    private lateinit var estimatedTimeLabel: TextView
     private lateinit var subtitle: TextView
     private lateinit var historySection: LinearLayout
     private lateinit var historyTable: TableLayout
@@ -87,7 +88,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val d = resources.displayMetrics.density
         val horizontalPad = (24 * d).toInt()
-        val topPad = (32 * d).toInt()
+        val topPad = (64 * d).toInt()
         val bottomPad = (40 * d).toInt()
         val sectionPad = (24 * d).toInt()
         selectedKm = WalkState.preferredDistanceKm(this)
@@ -143,10 +144,17 @@ class MainActivity : ComponentActivity() {
         }
         root.addView(selectedDistanceLabel)
 
+        estimatedTimeLabel = TextView(this).apply {
+            textSize = 14f
+            gravity = Gravity.CENTER
+            setPadding(0, (8 * d).toInt(), 0, (2 * d).toInt())
+        }
+        root.addView(estimatedTimeLabel)
+
         distanceSeek = SeekBar(this).apply {
             max = 19
             progress = selectedKm - 1
-            setPadding(0, (8 * d).toInt(), 0, 0)
+            setPadding(0, (4 * d).toInt(), 0, 0)
         }
         root.addView(distanceSeek, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
@@ -241,8 +249,19 @@ class MainActivity : ComponentActivity() {
 
     private fun updateSelectedDistanceText() {
         selectedDistanceLabel.text = "$selectedKm km"
-        subtitle.text = "10 km/h • ${selectedKm * WalkState.MINUTES_PER_KM} min"
+        subtitle.text = "10 km/h"
+        estimatedTimeLabel.text = "TEMPO ESTIMADO: ${formatEstimatedDuration(selectedKm * WalkState.MINUTES_PER_KM)}"
         if (!WalkState.isRunning(this)) button.text = "CAMINHAR $selectedKm KM"
+    }
+
+    private fun formatEstimatedDuration(totalMinutes: Int): String {
+        val hours = totalMinutes / 60
+        val minutes = totalMinutes % 60
+        return when {
+            hours == 0 -> "$minutes min"
+            minutes == 0 -> "$hours h"
+            else -> "$hours h $minutes min"
+        }
     }
 
     private fun addMetric(parent: LinearLayout, label: String, initial: String): TextView {
@@ -320,7 +339,8 @@ class MainActivity : ComponentActivity() {
             distanceSeek.progress = selectedKm - 1
             distanceSeek.isEnabled = false
             selectedDistanceLabel.text = "$selectedKm km"
-            subtitle.text = "10 km/h • ${selectedKm * WalkState.MINUTES_PER_KM} min"
+            subtitle.text = "10 km/h"
+            estimatedTimeLabel.text = "TEMPO ESTIMADO: ${formatEstimatedDuration(selectedKm * WalkState.MINUTES_PER_KM)}"
             button.text = "PARAR DE CAMINHAR"
             button.backgroundTintList = ColorStateList.valueOf(STOP_RED)
             button.setTextColor(Color.WHITE)
