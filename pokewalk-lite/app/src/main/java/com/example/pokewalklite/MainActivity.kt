@@ -3,12 +3,18 @@ package com.example.pokewalklite
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
+import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.SeekBar
+import android.widget.TableLayout
+import android.widget.TableRow
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
@@ -27,7 +33,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.Locale
-import kotlin.math.roundToLong
 
 class MainActivity : ComponentActivity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -38,6 +43,15 @@ class MainActivity : ComponentActivity() {
     private lateinit var elapsed: TextView
     private lateinit var distance: TextView
     private lateinit var steps: TextView
+    private lateinit var distanceSeek: SeekBar
+    private lateinit var selectedDistanceLabel: TextView
+    private lateinit var subtitle: TextView
+    private lateinit var historyTable: TableLayout
+
+    private var selectedKm = 5
+    private var historySignature = ""
+    private var defaultButtonTint: ColorStateList? = null
+    private lateinit var defaultButtonTextColors: ColorStateList
 
     private val healthPermissions = setOf(
         HealthPermission.getWritePermission(StepsRecord::class),
@@ -50,7 +64,7 @@ class MainActivity : ComponentActivity() {
         if (granted.containsAll(healthPermissions)) ensureActivityPermissionAndStart()
         else {
             status.text = "Permita passos e distância no Health Connect."
-            button.isEnabled = true
+            render()
         }
     }
 
@@ -60,7 +74,7 @@ class MainActivity : ComponentActivity() {
         if (granted) startWalk()
         else {
             status.text = "Permissão de atividade necessária."
-            button.isEnabled = true
+            render()
         }
     }
 
@@ -68,12 +82,15 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val d = resources.displayMetrics.density
         val pad = (24 * d).toInt()
+        selectedKm = WalkState.preferredDistanceKm(this)
 
+        val scroll = ScrollView(this).apply { isFillViewport = true }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
+            gravity = Gravity.CENTER_HORIZONTAL
             setPadding(pad, pad, pad, pad)
         }
+        scroll.addView(root, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         root.addView(TextView(this).apply {
             text = "PokeWalk Lite"
@@ -81,11 +98,58 @@ class MainActivity : ComponentActivity() {
             gravity = Gravity.CENTER
             setTypeface(typeface, Typeface.BOLD)
         })
-        root.addView(TextView(this).apply {
-            text = "5 km • 10 km/h • 30 min"
+
+        subtitle = TextView(this).apply {
             textSize = 17f
             gravity = Gravity.CENTER
             setPadding(0, (8 * d).toInt(), 0, pad)
+        }
+        root.addView(subtitle)
+
+        val selectorTitle = TextView(this).apply {
+            text = "DISTÂNCIA"
+            textSize = 12f
+            setTypeface(typeface, Typeface.BOLD)
+            gravity = Gravity.CENTER
+        }
+        root.addView(selectorTitle)
+
+        selectedDistanceLabel = TextView(this).apply {
+            textSize = 24f
+            setTypeface(typeface, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setPadding(0, (4 * d).toInt(), 0, 0)
+        }
+        root.addView(selectedDistanceLabel)
+
+        distanceSeek = SeekBar(this).apply {
+            max = 19
+            progress = selectedKm - 1
+            setPadding(0, (8 * d).toInt(), 0, 0)
+        }
+        root.addView(distanceSeek, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        val endpoints = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        endpoints.addView(TextView(this).apply { text = "1 km" }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        endpoints.addView(TextView(this).apply {
+            text = "20 km"
+            gravity = Gravity.END
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        root.addView(endpoints, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = pad
+        })
+
+        distanceSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (WalkState.isRunning(this@MainActivity)) return
+                selectedKm = progress + 1
+                WalkState.setPreferredDistanceKm(this@MainActivity, selectedKm)
+                updateSelectedDistanceText()
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+            override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
         })
 
         val metrics = LinearLayout(this).apply {
@@ -95,25 +159,51 @@ class MainActivity : ComponentActivity() {
         elapsed = addMetric(metrics, "TEMPO", "00:00")
         distance = addMetric(metrics, "DISTÂNCIA", "0,00 km")
         steps = addMetric(metrics, "PASSOS", "0")
-        root.addView(metrics, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = pad })
+        root.addView(metrics, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = pad
+        })
 
         button = Button(this).apply {
-            text = "ADICIONAR 5 KM"
             textSize = 18f
             minHeight = (56 * d).toInt()
-            setOnClickListener { prepareWalk() }
+            setOnClickListener {
+                if (WalkState.isRunning(this@MainActivity)) stopWalk() else prepareWalk()
+            }
         }
+        defaultButtonTint = button.backgroundTintList
+        defaultButtonTextColors = button.textColors
         root.addView(button, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         status = TextView(this).apply {
             text = "Pronto."
             textSize = 15f
             gravity = Gravity.CENTER
-            setPadding(0, pad, 0, 0)
+            setPadding(0, pad, 0, pad)
         }
         root.addView(status)
-        setContentView(root)
+
+        root.addView(TextView(this).apply {
+            text = "Últimas caminhadas"
+            textSize = 20f
+            setTypeface(typeface, Typeface.BOLD)
+            setPadding(0, (8 * d).toInt(), 0, (12 * d).toInt())
+        })
+
+        historyTable = TableLayout(this).apply {
+            isStretchAllColumns = true
+            addView(historyHeader())
+        }
+        root.addView(historyTable, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        setContentView(scroll)
+        updateSelectedDistanceText()
         render()
+    }
+
+    private fun updateSelectedDistanceText() {
+        selectedDistanceLabel.text = "$selectedKm km"
+        subtitle.text = "10 km/h • ${selectedKm * WalkState.MINUTES_PER_KM} min"
+        if (!WalkState.isRunning(this)) button.text = "CAMINHAR $selectedKm KM"
     }
 
     private fun addMetric(parent: LinearLayout, label: String, initial: String): TextView {
@@ -137,6 +227,20 @@ class MainActivity : ComponentActivity() {
         return value
     }
 
+    private fun historyHeader(): TableRow = TableRow(this).apply {
+        addView(tableCell("TEMPO", true))
+        addView(tableCell("DISTÂNCIA", true))
+        addView(tableCell("PASSOS", true))
+    }
+
+    private fun tableCell(value: String, bold: Boolean = false): TextView = TextView(this).apply {
+        text = value
+        textSize = if (bold) 12f else 15f
+        gravity = Gravity.CENTER
+        setPadding(4, 12, 4, 12)
+        if (bold) setTypeface(typeface, Typeface.BOLD)
+    }
+
     override fun onResume() {
         super.onResume()
         ticker?.cancel()
@@ -156,39 +260,91 @@ class MainActivity : ComponentActivity() {
 
     private fun render() {
         val running = WalkState.isRunning(this)
-        val start = WalkState.startTimeMillis(this)
-        val finished = WalkState.isFinished(this)
-        val elapsedMs = when {
-            start <= 0L -> 0L
-            finished -> WalkState.TOTAL_DURATION_MS
-            else -> (System.currentTimeMillis() - start).coerceIn(0L, WalkState.TOTAL_DURATION_MS)
+        val metrics = when {
+            running -> {
+                val elapsedMs = (System.currentTimeMillis() - WalkState.startTimeMillis(this))
+                    .coerceIn(0L, WalkState.totalDurationMs(this))
+                WalkState.metricsAt(this, elapsedMs)
+            }
+            WalkState.hasResult(this) -> WalkState.finalMetrics(this)
+            else -> WalkState.Metrics(0L, 0.0, 0L)
         }
-        val progress = elapsedMs.toDouble() / WalkState.TOTAL_DURATION_MS
-        val meters = WalkState.TOTAL_DISTANCE_METERS * progress
-        val stepCount = (WalkState.TOTAL_STEPS * progress).roundToLong()
-        val sec = elapsedMs / 1000L
 
-        elapsed.text = String.format(Locale.getDefault(), "%02d:%02d", sec / 60L, sec % 60L)
-        distance.text = String.format(Locale.getDefault(), "%.2f km", meters / 1000.0)
-        steps.text = String.format(Locale.getDefault(), "%,d", stepCount)
-        button.isEnabled = !running
-        button.text = if (running) "CAMINHANDO…" else "ADICIONAR 5 KM"
+        val sec = metrics.durationMs / 1000L
+        elapsed.text = if (sec >= 3600L) {
+            String.format(Locale.getDefault(), "%02d:%02d:%02d", sec / 3600L, (sec % 3600L) / 60L, sec % 60L)
+        } else {
+            String.format(Locale.getDefault(), "%02d:%02d", sec / 60L, sec % 60L)
+        }
+        distance.text = String.format(Locale.getDefault(), "%.2f km", metrics.distanceMeters / 1000.0)
+        steps.text = String.format(Locale.getDefault(), "%,d", metrics.steps)
+
+        if (running) {
+            selectedKm = WalkState.targetDistanceKm(this)
+            distanceSeek.progress = selectedKm - 1
+            distanceSeek.isEnabled = false
+            selectedDistanceLabel.text = "$selectedKm km"
+            subtitle.text = "10 km/h • ${selectedKm * WalkState.MINUTES_PER_KM} min"
+            button.text = "PARAR DE CAMINHAR"
+            button.backgroundTintList = ColorStateList.valueOf(Color.rgb(198, 40, 40))
+            button.setTextColor(Color.WHITE)
+        } else {
+            distanceSeek.isEnabled = true
+            button.backgroundTintList = defaultButtonTint
+            button.setTextColor(defaultButtonTextColors)
+            button.text = "CAMINHAR $selectedKm KM"
+        }
+
         status.text = when {
-            running -> "Caminhando • Health Connect: ${WalkState.completedChunks(this)}/30 gravações"
+            running -> "Caminhando • Health Connect: ${WalkState.completedChunks(this)}/${WalkState.chunkCount(this)} gravações"
             WalkState.error(this) != null -> "Erro: ${WalkState.error(this)}"
-            finished -> "Concluído: 5,00 km em 30:00."
+            WalkState.isStopped(this) -> "Caminhada interrompida."
+            WalkState.isFinished(this) -> "Concluído."
             else -> "Pronto."
+        }
+
+        renderHistory()
+    }
+
+    private fun renderHistory() {
+        val history = WalkState.history(this)
+        val signature = history.joinToString("|") { "${it.endedAtMillis}:${it.durationMs}:${it.distanceMeters}:${it.steps}" }
+        if (signature == historySignature) return
+        historySignature = signature
+
+        while (historyTable.childCount > 1) historyTable.removeViewAt(1)
+        if (history.isEmpty()) {
+            historyTable.addView(TableRow(this).apply {
+                addView(TextView(this@MainActivity).apply {
+                    text = "Nenhuma caminhada ainda."
+                    gravity = Gravity.CENTER
+                    setPadding(4, 18, 4, 18)
+                }, TableRow.LayoutParams().apply { span = 3 })
+            })
+            return
+        }
+
+        history.forEach { entry ->
+            val sec = entry.durationMs / 1000L
+            val time = if (sec >= 3600L) {
+                String.format(Locale.getDefault(), "%02d:%02d:%02d", sec / 3600L, (sec % 3600L) / 60L, sec % 60L)
+            } else {
+                String.format(Locale.getDefault(), "%02d:%02d", sec / 60L, sec % 60L)
+            }
+            historyTable.addView(TableRow(this).apply {
+                addView(tableCell(time))
+                addView(tableCell(String.format(Locale.getDefault(), "%.2f km", entry.distanceMeters / 1000.0)))
+                addView(tableCell(String.format(Locale.getDefault(), "%,d", entry.steps)))
+            })
         }
     }
 
     private fun prepareWalk() {
         if (WalkState.isRunning(this)) return
-        button.isEnabled = false
         status.text = "Verificando Health Connect…"
 
         if (HealthConnectClient.getSdkStatus(this) != HealthConnectClient.SDK_AVAILABLE) {
             status.text = "Health Connect indisponível ou desatualizado."
-            button.isEnabled = true
             return
         }
 
@@ -209,9 +365,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startWalk() {
-        WalkState.begin(this)
+        WalkState.begin(this, selectedKm)
         ContextCompat.startForegroundService(this, Intent(this, WalkService::class.java))
         render()
+    }
+
+    private fun stopWalk() {
+        if (!WalkState.isRunning(this)) return
+        status.text = "Parando…"
+        startService(Intent(this, WalkService::class.java).apply { action = WalkService.ACTION_STOP })
     }
 
     override fun onDestroy() {
