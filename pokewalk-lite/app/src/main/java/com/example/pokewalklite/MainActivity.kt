@@ -51,7 +51,6 @@ class MainActivity : ComponentActivity() {
     private lateinit var distanceSeek: SeekBar
     private lateinit var selectedDistanceLabel: TextView
     private lateinit var estimatedTimeLabel: TextView
-    private lateinit var subtitle: TextView
     private lateinit var historySection: LinearLayout
     private lateinit var historyTable: TableLayout
 
@@ -120,36 +119,19 @@ class MainActivity : ComponentActivity() {
             textSize = 28f
             gravity = Gravity.CENTER
             setTypeface(typeface, Typeface.BOLD)
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = sectionPad
         })
 
-        subtitle = TextView(this).apply {
-            textSize = 17f
+        val selectorMetrics = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(0, (8 * d).toInt(), 0, sectionPad)
         }
-        root.addView(subtitle)
-
-        root.addView(TextView(this).apply {
-            text = "DISTÂNCIA"
-            textSize = 12f
-            setTypeface(typeface, Typeface.BOLD)
-            gravity = Gravity.CENTER
+        selectedDistanceLabel = addSelectorMetric(selectorMetrics, "DISTÂNCIA", "$selectedKm km")
+        estimatedTimeLabel = addSelectorMetric(selectorMetrics, "TEMPO ESTIMADO", "")
+        root.addView(selectorMetrics, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = (8 * d).toInt()
         })
-
-        selectedDistanceLabel = TextView(this).apply {
-            textSize = 24f
-            setTypeface(typeface, Typeface.BOLD)
-            gravity = Gravity.CENTER
-            setPadding(0, (4 * d).toInt(), 0, 0)
-        }
-        root.addView(selectedDistanceLabel)
-
-        estimatedTimeLabel = TextView(this).apply {
-            textSize = 14f
-            gravity = Gravity.CENTER
-            setPadding(0, (8 * d).toInt(), 0, (2 * d).toInt())
-        }
-        root.addView(estimatedTimeLabel)
 
         distanceSeek = SeekBar(this).apply {
             max = 19
@@ -247,10 +229,31 @@ class MainActivity : ComponentActivity() {
         render()
     }
 
+    private fun addSelectorMetric(parent: LinearLayout, label: String, initial: String): TextView {
+        val value = TextView(this).apply {
+            text = initial
+            textSize = 24f
+            gravity = Gravity.CENTER
+            setTypeface(typeface, Typeface.BOLD)
+        }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            addView(TextView(this@MainActivity).apply {
+                text = label
+                textSize = 12f
+                gravity = Gravity.CENTER
+                setTypeface(typeface, Typeface.BOLD)
+            })
+            addView(value)
+        }
+        parent.addView(box, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        return value
+    }
+
     private fun updateSelectedDistanceText() {
         selectedDistanceLabel.text = "$selectedKm km"
-        subtitle.text = "10 km/h"
-        estimatedTimeLabel.text = "TEMPO ESTIMADO: ${formatEstimatedDuration(selectedKm * WalkState.MINUTES_PER_KM)}"
+        estimatedTimeLabel.text = formatEstimatedDuration(selectedKm * WalkState.MINUTES_PER_KM)
         if (!WalkState.isRunning(this)) button.text = "CAMINHAR $selectedKm KM"
     }
 
@@ -339,9 +342,8 @@ class MainActivity : ComponentActivity() {
             distanceSeek.progress = selectedKm - 1
             distanceSeek.isEnabled = false
             selectedDistanceLabel.text = "$selectedKm km"
-            subtitle.text = "10 km/h"
-            estimatedTimeLabel.text = "TEMPO ESTIMADO: ${formatEstimatedDuration(selectedKm * WalkState.MINUTES_PER_KM)}"
-            button.text = "PARAR DE CAMINHAR"
+            estimatedTimeLabel.text = formatEstimatedDuration(selectedKm * WalkState.MINUTES_PER_KM)
+            button.text = "CANCELAR CAMINHADA"
             button.backgroundTintList = ColorStateList.valueOf(STOP_RED)
             button.setTextColor(Color.WHITE)
         } else {
@@ -352,9 +354,9 @@ class MainActivity : ComponentActivity() {
         }
 
         status.text = when {
-            running -> "Caminhando • Health Connect: ${WalkState.completedChunks(this)}/${WalkState.chunkCount(this)} gravações"
+            running -> "Health Connect: ${WalkState.completedChunks(this)}/${WalkState.chunkCount(this)} gravações"
             WalkState.error(this) != null -> "Erro: ${WalkState.error(this)}"
-            WalkState.isStopped(this) -> "Caminhada interrompida."
+            WalkState.isStopped(this) -> "Progresso parcial salvo."
             WalkState.isFinished(this) -> "Concluído."
             else -> "Pronto."
         }
@@ -441,7 +443,7 @@ class MainActivity : ComponentActivity() {
 
     private fun stopWalk() {
         if (!WalkState.isRunning(this)) return
-        status.text = "Parando…"
+        status.text = "Salvando progresso…"
         startService(Intent(this, WalkService::class.java).apply { action = WalkService.ACTION_STOP })
     }
 
