@@ -40,10 +40,12 @@ jobs:
 
       - name: Package Android signing tools
         run: |
-          mkdir -p android-signing-tools/lib
+          mkdir -p android-signing-tools/lib android-signing-tools/lib64
           cp "$ANDROID_HOME/build-tools/36.0.0/apksigner" android-signing-tools/
           cp "$ANDROID_HOME/build-tools/36.0.0/zipalign" android-signing-tools/
+          cp "$ANDROID_HOME/build-tools/36.0.0/aapt2" android-signing-tools/
           cp "$ANDROID_HOME/build-tools/36.0.0/lib/apksigner.jar" android-signing-tools/lib/
+          cp "$ANDROID_HOME/build-tools/36.0.0/lib64/libc++.so" android-signing-tools/lib64/
 
       - name: Upload unsigned APK
         uses: actions/upload-artifact@v4
