@@ -8,10 +8,10 @@ import kotlin.math.roundToLong
 import kotlin.random.Random
 
 object WalkState {
-    const val SPEED_KMH = 10.0
-    const val MINUTES_PER_KM = 6
-    const val METERS_PER_MINUTE = 10000.0 / 60.0
-    private const val BASE_STEPS_PER_MINUTE = 217
+    const val SPEED_KMH = 7.5
+    const val MINUTES_PER_KM = 8
+    const val METERS_PER_MINUTE = 125.0
+    private const val BASE_STEPS_PER_MINUTE = 163
 
     private const val PREFS = "pokewalk_state"
     private const val KEY_RUNNING = "running"
