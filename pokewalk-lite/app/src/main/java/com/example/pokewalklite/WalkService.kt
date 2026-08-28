@@ -22,15 +22,18 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.Instant
 import java.time.ZoneId
+import java.util.Locale
 import java.util.UUID
 
 class WalkService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var job: Job? = null
+    private var notificationTicker: Job? = null
     @Volatile private var stopRequested = false
 
     override fun onCreate() {
@@ -52,9 +55,50 @@ class WalkService : Service() {
         if (job?.isActive == true) return START_STICKY
         stopRequested = false
         val start = WalkState.ensureStarted(this)
-        startAsForeground(0)
+        startAsForeground(start)
+        startNotificationTicker(start)
         job = scope.launch { runWalk(start) }
         return START_STICKY
+    }
+
+    private fun startNotificationTicker(startMillis: Long) {
+        notificationTicker?.cancel()
+        notificationTicker = scope.launch {
+            while (isActive && WalkState.isRunning(this@WalkService)) {
+                updateLiveNotification(startMillis)
+                delay(1_000L)
+            }
+        }
+    }
+
+    private fun updateLiveNotification(startMillis: Long) {
+        val elapsedMs = (System.currentTimeMillis() - startMillis)
+            .coerceIn(0L, WalkState.totalDurationMs(this))
+        val metrics = WalkState.metricsAt(this, elapsedMs)
+        val completed = WalkState.completedChunks(this)
+        val text = String.format(
+            Locale.getDefault(),
+            "%s • %.2f km • %,d passos",
+            formatDuration(metrics.durationMs),
+            metrics.distanceMeters / 1000.0,
+            metrics.steps
+        )
+        getSystemService(NotificationManager::class.java).notify(
+            NOTIFICATION_ID,
+            notification(completed, text, ongoing = true)
+        )
+    }
+
+    private fun formatDuration(durationMs: Long): String {
+        val totalSeconds = durationMs / 1_000L
+        val hours = totalSeconds / 3_600L
+        val minutes = (totalSeconds % 3_600L) / 60L
+        val seconds = totalSeconds % 60L
+        return if (hours > 0L) {
+            String.format(Locale.getDefault(), "%d:%02d:%02d", hours, minutes, seconds)
+        } else {
+            String.format(Locale.getDefault(), "%02d:%02d", minutes, seconds)
+        }
     }
 
     private suspend fun runWalk(startMillis: Long) {
@@ -83,14 +127,24 @@ class WalkService : Service() {
                 )
 
                 WalkState.markChunkWritten(this, index + 1)
-                updateNotification(index + 1)
             }
 
             WalkState.finish(this)
-            val km = WalkState.targetDistanceKm(this)
+            notificationTicker?.cancel()
+            val metrics = WalkState.finalMetrics(this)
             getSystemService(NotificationManager::class.java).notify(
                 NOTIFICATION_ID,
-                notification(chunks, String.format("%d,00 km concluídos", km))
+                notification(
+                    chunks,
+                    String.format(
+                        Locale.getDefault(),
+                        "Concluído • %s • %.2f km • %,d passos",
+                        formatDuration(metrics.durationMs),
+                        metrics.distanceMeters / 1000.0,
+                        metrics.steps
+                    ),
+                    ongoing = false
+                )
             )
         } catch (cancelled: CancellationException) {
             if (!stopRequested) throw cancelled
@@ -102,6 +156,7 @@ class WalkService : Service() {
                     finalizeStoppedWalk(client, sessionStart, sessionId)
                 }
             }
+            notificationTicker?.cancel()
             stopForeground(STOP_FOREGROUND_DETACH)
             stopSelf()
         }
@@ -149,7 +204,14 @@ class WalkService : Service() {
             NOTIFICATION_ID,
             notification(
                 WalkState.completedChunks(this),
-                String.format("Parado • %.2f km", metrics.distanceMeters / 1000.0)
+                String.format(
+                    Locale.getDefault(),
+                    "Parado • %s • %.2f km • %,d passos",
+                    formatDuration(metrics.durationMs),
+                    metrics.distanceMeters / 1000.0,
+                    metrics.steps
+                ),
+                ongoing = false
             )
         )
     }
@@ -203,38 +265,38 @@ class WalkService : Service() {
         }
     }
 
-    private fun notification(progress: Int, text: String): android.app.Notification {
+    private fun notification(progress: Int, text: String, ongoing: Boolean): android.app.Notification {
         val max = WalkState.chunkCount(this).coerceAtLeast(1)
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentTitle("PokeWalk Lite")
             .setContentText(text)
             .setOnlyAlertOnce(true)
-            .setOngoing(WalkState.isRunning(this))
+            .setSilent(true)
+            .setOngoing(ongoing)
             .setProgress(max, progress.coerceIn(0, max), false)
             .build()
     }
 
-    private fun startAsForeground(progress: Int) {
-        val km = WalkState.targetDistanceKm(this)
-        val n = notification(progress, "$km km a 10 km/h")
+    private fun startAsForeground(startMillis: Long) {
+        val metrics = WalkState.metricsAt(this, 0L)
+        val text = String.format(
+            Locale.getDefault(),
+            "%s • %.2f km • %,d passos",
+            formatDuration(metrics.durationMs),
+            metrics.distanceMeters / 1000.0,
+            metrics.steps
+        )
+        val n = notification(0, text, ongoing = true)
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH)
         } else startForeground(NOTIFICATION_ID, n)
     }
 
-    private fun updateNotification(completed: Int) {
-        val km = completed * WalkState.METERS_PER_MINUTE / 1000.0
-        val target = WalkState.targetDistanceKm(this).toDouble()
-        getSystemService(NotificationManager::class.java).notify(
-            NOTIFICATION_ID,
-            notification(completed, String.format("%.2f / %.2f km", km, target))
-        )
-    }
-
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        notificationTicker?.cancel()
         scope.cancel()
         super.onDestroy()
     }
