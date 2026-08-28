@@ -10,8 +10,8 @@ android {
         applicationId = "com.example.pokewalklite"
         minSdk = 28
         targetSdk = 36
-        versionCode = 6
-        versionName = "0.4.2"
+        versionCode = 7
+        versionName = "0.4.3"
     }
 }
 
