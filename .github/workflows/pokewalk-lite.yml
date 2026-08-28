@@ -31,18 +31,12 @@ jobs:
         with:
           gradle-version: "9.5.0"
 
-      - name: Unpack source
-        run: |
-          mkdir -p /tmp/pokewalk-build
-          base64 --decode pokewalk-lite/PokeWalkLite-corrected.zip.b64 > /tmp/PokeWalkLite.zip
-          unzip -q /tmp/PokeWalkLite.zip -d /tmp/pokewalk-build
-
       - name: Build debug APK
-        working-directory: /tmp/pokewalk-build/PokeWalkLite
+        working-directory: pokewalk-lite
         run: gradle --no-daemon :app:assembleDebug
 
       - name: Copy APK
-        run: cp /tmp/pokewalk-build/PokeWalkLite/app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/PokeWalkLite.apk"
+        run: cp pokewalk-lite/app/build/outputs/apk/debug/app-debug.apk PokeWalkLite.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
