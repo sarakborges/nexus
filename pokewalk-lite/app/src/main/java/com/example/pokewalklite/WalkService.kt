@@ -108,7 +108,7 @@ class WalkService : Service() {
 
         return NotificationCompat.Builder(this, ACTIVE_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_media_play)
-            .setContentTitle("PokeWalk Lite • caminhando")
+            .setContentTitle("PokeWalk Lite")
             .setContentText(text)
             .setContentIntent(openAppPendingIntent())
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
@@ -209,7 +209,7 @@ class WalkService : Service() {
                 resultMetrics = withContext(NonCancellable) {
                     finalizeStoppedWalk(client, sessionStart, sessionId)
                 }
-                resultTitle = "Caminhada interrompida"
+                resultTitle = "Progresso salvo"
             }
 
             notificationTicker?.cancel()
@@ -231,33 +231,47 @@ class WalkService : Service() {
     ): WalkState.Metrics {
         val totalDuration = WalkState.totalDurationMs(this)
         val durationMs = (System.currentTimeMillis() - sessionStart.toEpochMilli()).coerceIn(0L, totalDuration)
-        val completed = WalkState.completedChunks(this)
         val chunks = WalkState.chunkCount(this)
         val plan = WalkState.stepPlan(this)
+        val elapsedFullMinutes = (durationMs / 60_000L).toInt().coerceIn(0, chunks)
+        var completed = WalkState.completedChunks(this).coerceIn(0, chunks)
 
-        if (completed < chunks) {
-            val partialStart = sessionStart.plusSeconds(completed * 60L)
-            val partialEndMillis = sessionStart.toEpochMilli() + durationMs
-            val partialEnd = Instant.ofEpochMilli(partialEndMillis)
-            val partialMs = (partialEndMillis - partialStart.toEpochMilli()).coerceIn(0L, 59_999L)
+        // Reconcile any complete minutes that elapsed but were not persisted yet.
+        for (index in completed until elapsedFullMinutes) {
+            val intervalStart = sessionStart.plusSeconds(index * 60L)
+            val intervalEnd = sessionStart.plusSeconds((index + 1) * 60L)
+            writeChunk(
+                client = client,
+                sessionId = sessionId,
+                index = index,
+                intervalStart = intervalStart,
+                intervalEnd = intervalEnd,
+                meters = WalkState.METERS_PER_MINUTE,
+                steps = plan[index].toLong()
+            )
+            WalkState.markChunkWritten(this, index + 1)
+            completed = index + 1
+        }
 
-            if (partialMs > 0L) {
-                val fraction = partialMs / 60_000.0
-                val partialMeters = WalkState.METERS_PER_MINUTE * fraction
-                val partialSteps = (plan[completed] * fraction).toLong().coerceAtLeast(0L)
+        // Persist the fraction of the current minute too.
+        val remainingMs = durationMs % 60_000L
+        if (remainingMs > 0L && elapsedFullMinutes < chunks) {
+            val partialIndex = elapsedFullMinutes
+            val partialStart = sessionStart.plusSeconds(partialIndex * 60L)
+            val partialEnd = Instant.ofEpochMilli(sessionStart.toEpochMilli() + durationMs)
+            val fraction = remainingMs / 60_000.0
+            val partialMeters = WalkState.METERS_PER_MINUTE * fraction
+            val partialSteps = (plan[partialIndex] * fraction).toLong().coerceAtLeast(0L)
 
-                runCatching {
-                    writeChunk(
-                        client = client,
-                        sessionId = sessionId,
-                        index = completed,
-                        intervalStart = partialStart,
-                        intervalEnd = partialEnd,
-                        meters = partialMeters,
-                        steps = partialSteps
-                    )
-                }
-            }
+            writeChunk(
+                client = client,
+                sessionId = sessionId,
+                index = partialIndex,
+                intervalStart = partialStart,
+                intervalEnd = partialEnd,
+                meters = partialMeters,
+                steps = partialSteps
+            )
         }
 
         val metrics = WalkState.metricsAt(this, durationMs)
