@@ -605,19 +605,19 @@ class MainActivity : ComponentActivity() {
             val prefix = "pokewalk-${entry.startedAtMillis}-${entry.mode.storedValue}"
 
             val distanceRecords = client.readRecords(
-                ReadRecordsRequest(DistanceRecord::class, timeRangeFilter = range)
+                ReadRecordsRequest(DistanceRecord::class, timeRangeFilter = range, pageSize = 5000)
             ).records.filter { it.metadata.clientRecordId?.startsWith("$prefix-distance-") == true }
 
             val stepRecords = client.readRecords(
-                ReadRecordsRequest(StepsRecord::class, timeRangeFilter = range)
+                ReadRecordsRequest(StepsRecord::class, timeRangeFilter = range, pageSize = 5000)
             ).records.filter { it.metadata.clientRecordId?.startsWith("$prefix-steps-") == true }
 
             val speedRecords = client.readRecords(
-                ReadRecordsRequest(SpeedRecord::class, timeRangeFilter = range)
+                ReadRecordsRequest(SpeedRecord::class, timeRangeFilter = range, pageSize = 5000)
             ).records.filter { it.metadata.clientRecordId?.startsWith("$prefix-speed-") == true }
 
             val exerciseRecords = client.readRecords(
-                ReadRecordsRequest(ExerciseSessionRecord::class, timeRangeFilter = range)
+                ReadRecordsRequest(ExerciseSessionRecord::class, timeRangeFilter = range, pageSize = 5000)
             ).records.filter { it.metadata.clientRecordId == "$prefix-exercise" }
 
             val confirmedDistance = distanceRecords.sumOf { it.distance.inMeters }
