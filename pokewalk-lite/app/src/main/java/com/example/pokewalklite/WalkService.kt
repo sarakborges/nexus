@@ -29,6 +29,7 @@ import kotlinx.coroutines.withContext
 import java.time.Instant
 import java.time.ZoneId
 import java.util.Locale
+import java.util.UUID
 import kotlin.math.roundToLong
 
 class WalkService : Service() {
@@ -70,23 +71,12 @@ class WalkService : Service() {
             return START_NOT_STICKY
         }
 
-        if (!WalkState.isRunning(this)) {
-            stopSelf()
-            return START_NOT_STICKY
-        }
         if (job?.isActive == true) return START_STICKY
-
         stopRequested = false
-        val start = WalkState.startTimeMillis(this)
-        if (start <= 0L) {
-            WalkState.fail(this, "Horário inicial da atividade ausente")
-            stopSelf()
-            return START_NOT_STICKY
-        }
-
+        val start = WalkState.ensureStarted(this)
         startAsForeground(start)
         startNotificationTicker(start)
-        job = scope.launch { runActivity(start) }
+        job = scope.launch { runWalk(start) }
         return START_STICKY
     }
 
@@ -179,9 +169,11 @@ class WalkService : Service() {
         }
     }
 
-    private suspend fun runActivity(startMillis: Long) {
+    private suspend fun runWalk(startMillis: Long) {
         val client = HealthConnectClient.getOrCreate(this)
-        val prefix = WalkState.recordPrefix(startMillis)
+
+        // Exact v0.4.4 behavior: every service run gets a fresh random UUID.
+        val sessionId = UUID.randomUUID().toString()
         val chunks = WalkState.chunkCount(this)
         var resultTitle: String? = null
         var resultMetrics: WalkState.Metrics? = null
@@ -189,20 +181,23 @@ class WalkService : Service() {
         try {
             val first = WalkState.completedChunks(this)
             for (index in first until chunks) {
-                val intervalStart = Instant.ofEpochMilli(startMillis + WalkState.chunkStartOffsetMs(index))
-                val intervalEnd = Instant.ofEpochMilli(startMillis + WalkState.chunkEndOffsetMs(this, index))
+                val intervalStart = Instant.ofEpochMilli(
+                    startMillis + WalkState.chunkStartOffsetMs(index)
+                )
+                val intervalEnd = Instant.ofEpochMilli(
+                    startMillis + WalkState.chunkEndOffsetMs(this, index)
+                )
                 val waitMs = intervalEnd.toEpochMilli() - System.currentTimeMillis()
                 if (waitMs > 0L) delay(waitMs)
 
                 writeChunk(
                     client = client,
-                    prefix = prefix,
+                    sessionId = sessionId,
                     index = index,
                     intervalStart = intervalStart,
                     intervalEnd = intervalEnd,
                     meters = WalkState.distanceForChunk(this, index),
-                    steps = WalkState.stepsForChunk(this, index).toLong(),
-                    partial = false
+                    steps = WalkState.stepsForChunk(this, index).toLong()
                 )
                 WalkState.markChunkWritten(this, index + 1)
             }
@@ -217,7 +212,7 @@ class WalkService : Service() {
         } finally {
             if (stopRequested) {
                 resultMetrics = withContext(NonCancellable) {
-                    finalizeStoppedActivity(client, startMillis, prefix)
+                    finalizeStoppedWalk(client, startMillis, sessionId)
                 }
                 resultTitle = "Progresso salvo"
             }
@@ -234,10 +229,10 @@ class WalkService : Service() {
         }
     }
 
-    private suspend fun finalizeStoppedActivity(
+    private suspend fun finalizeStoppedWalk(
         client: HealthConnectClient,
         startMillis: Long,
-        prefix: String
+        sessionId: String
     ): WalkState.Metrics {
         val totalDuration = WalkState.totalDurationMs(this)
         val durationMs = (System.currentTimeMillis() - startMillis).coerceIn(0L, totalDuration)
@@ -245,27 +240,28 @@ class WalkService : Service() {
         val elapsedFullChunks = WalkState.fullChunksElapsed(this, durationMs)
         var completed = WalkState.completedChunks(this).coerceIn(0, chunks)
 
+        // Same 0.4.4 reconciliation idea: write any complete minute that elapsed.
         for (index in completed until elapsedFullChunks) {
-            val intervalStart = Instant.ofEpochMilli(startMillis + WalkState.chunkStartOffsetMs(index))
-            val intervalEnd = Instant.ofEpochMilli(startMillis + WalkState.chunkEndOffsetMs(this, index))
-            val ok = runCatching {
-                writeChunk(
-                    client = client,
-                    prefix = prefix,
-                    index = index,
-                    intervalStart = intervalStart,
-                    intervalEnd = intervalEnd,
-                    meters = WalkState.distanceForChunk(this, index),
-                    steps = WalkState.stepsForChunk(this, index).toLong(),
-                    partial = false
-                )
-            }.isSuccess
-            if (ok) {
-                WalkState.markChunkWritten(this, index + 1)
-                completed = index + 1
-            }
+            val intervalStart = Instant.ofEpochMilli(
+                startMillis + WalkState.chunkStartOffsetMs(index)
+            )
+            val intervalEnd = Instant.ofEpochMilli(
+                startMillis + WalkState.chunkEndOffsetMs(this, index)
+            )
+            writeChunk(
+                client = client,
+                sessionId = sessionId,
+                index = index,
+                intervalStart = intervalStart,
+                intervalEnd = intervalEnd,
+                meters = WalkState.distanceForChunk(this, index),
+                steps = WalkState.stepsForChunk(this, index).toLong()
+            )
+            WalkState.markChunkWritten(this, index + 1)
+            completed = index + 1
         }
 
+        // Persist the fraction of the current minute on cancel, as in v0.4.4.
         if (durationMs < totalDuration && elapsedFullChunks < chunks) {
             val partialIndex = elapsedFullChunks
             val chunkStartOffset = WalkState.chunkStartOffsetMs(partialIndex)
@@ -281,18 +277,15 @@ class WalkService : Service() {
                     .roundToLong()
                     .coerceAtLeast(0L)
 
-                runCatching {
-                    writeChunk(
-                        client = client,
-                        prefix = prefix,
-                        index = partialIndex,
-                        intervalStart = partialStart,
-                        intervalEnd = partialEnd,
-                        meters = partialMeters,
-                        steps = partialSteps,
-                        partial = true
-                    )
-                }
+                writeChunk(
+                    client = client,
+                    sessionId = sessionId,
+                    index = partialIndex,
+                    intervalStart = partialStart,
+                    intervalEnd = partialEnd,
+                    meters = partialMeters,
+                    steps = partialSteps
+                )
             }
         }
 
@@ -303,19 +296,18 @@ class WalkService : Service() {
 
     private suspend fun writeChunk(
         client: HealthConnectClient,
-        prefix: String,
+        sessionId: String,
         index: Int,
         intervalStart: Instant,
         intervalEnd: Instant,
         meters: Double,
-        steps: Long,
-        partial: Boolean
+        steps: Long
     ) {
         if (!intervalEnd.isAfter(intervalStart)) return
         val device = Device(type = Device.TYPE_PHONE)
         val zone = ZoneId.systemDefault()
-        val suffix = if (partial) "-$index-partial-${intervalEnd.toEpochMilli()}" else "-$index"
 
+        // Keep the exact v0.4.4 write order: Distance first, Steps second.
         if (meters > 0.0) {
             client.insertRecords(
                 listOf(
@@ -327,7 +319,7 @@ class WalkService : Service() {
                         endZoneOffset = zone.rules.getOffset(intervalEnd),
                         metadata = Metadata.activelyRecorded(
                             device = device,
-                            clientRecordId = "$prefix-distance$suffix"
+                            clientRecordId = "$sessionId-distance-$index-${intervalEnd.toEpochMilli()}"
                         )
                     )
                 )
@@ -345,7 +337,7 @@ class WalkService : Service() {
                         endZoneOffset = zone.rules.getOffset(intervalEnd),
                         metadata = Metadata.activelyRecorded(
                             device = device,
-                            clientRecordId = "$prefix-steps$suffix"
+                            clientRecordId = "$sessionId-steps-$index-${intervalEnd.toEpochMilli()}"
                         )
                     )
                 )
